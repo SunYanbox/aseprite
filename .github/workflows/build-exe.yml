@@ -1,0 +1,94 @@
+name: Build Windows EXE
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'
+        
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
+      
+    - name: Install Ninja
+      uses: aseprite/get-ninja@main
+      
+    - name: Install Skia
+      shell: bash
+      run: |
+        this_dir=$(cygpath "${{ github.workspace }}")
+        skia_url=$(source $this_dir/laf/misc/skia-url.sh | xargs)
+        skia_file=$(basename $skia_url)
+        curl --ssl-revoke-best-effort -L -o "$skia_file" "$skia_url"
+        unzip "$skia_file" -d skia
+        
+    - name: Configure CMake
+      shell: bash
+      run: |
+        cmake -S . -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+          -DENABLE_SCRIPTING=ON \
+          -DLAF_BACKEND=skia \
+          -DSKIA_DIR=$(realpath skia) \
+          -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-x64)
+          
+    - name: Build Aseprite
+      shell: bash
+      run: |
+        cd build && ninja aseprite
+        
+    - name: Verify executable
+      shell: bash
+      run: |
+        if [ -f "build/bin/aseprite.exe" ]; then
+          echo "✓ aseprite.exe built successfully"
+          ls -la build/bin/aseprite.exe
+        else
+          echo "✗ aseprite.exe not found"
+          exit 1
+        fi
+        
+    - name: Package executable with data
+      shell: bash
+      run: |
+        mkdir -p aseprite-package
+        cp build/bin/aseprite.exe aseprite-package/
+        cp -r data aseprite-package/
+        cp README.md aseprite-package/
+        cp EULA.txt aseprite-package/
+        
+    - name: Upload executable artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: aseprite-windows-exe
+        path: aseprite-package/
+        retention-days: 30
+        
+    - name: Create release assets
+      if: github.event_name == 'release'
+      shell: bash
+      run: |
+        cd aseprite-package
+        7z a -tzip ../aseprite-windows-exe.zip *
+        
+    - name: Upload release asset
+      if: github.event_name == 'release'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./aseprite-windows-exe.zip
+        asset_name: aseprite-windows-exe.zip
+        asset_content_type: application/zip
