@@ -1,0 +1,138 @@
+name: Build EXE Application
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'RelWithDebInfo'
+        type: choice
+        options:
+        - RelWithDebInfo
+        - Release
+        - Debug
+      upload_artifacts:
+        description: 'Upload artifacts'
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  build-exe:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'
+        
+    - name: Setup MSVC compiler
+      uses: ilammy/msvc-dev-cmd@v1
+      
+    - name: Setup Ninja build system
+      uses: aseprite/get-ninja@main
+      
+    - name: Build using automated script
+      shell: bash
+      run: |
+        echo "Starting automated build with build.sh..."
+        bash build.sh --auto --norun
+        
+    - name: Verify build output
+      shell: bash
+      run: |
+        # Find the build directory
+        if [ -d "build" ]; then
+          build_dir="build"
+        elif [ -f ".build/builds_dir" ]; then
+          builds_dir=$(cat .build/builds_dir)
+          build_dir=$(find $builds_dir -name "aseprite.exe" -path "*/bin/*" | head -1 | dirname)
+          build_dir=$(dirname $build_dir)
+        else
+          echo "Build directory not found"
+          exit 1
+        fi
+        
+        echo "Build directory: $build_dir"
+        
+        if [ -f "$build_dir/bin/aseprite.exe" ]; then
+          echo "✓ aseprite.exe found at: $build_dir/bin/aseprite.exe"
+          ls -la "$build_dir/bin/aseprite.exe"
+          
+          # Get file info
+          file_size=$(stat -c%s "$build_dir/bin/aseprite.exe")
+          echo "File size: $file_size bytes"
+          
+          # Test if executable runs
+          echo "Testing executable..."
+          "$build_dir/bin/aseprite.exe" --version || echo "Version check failed but exe exists"
+        else
+          echo "✗ aseprite.exe not found in expected location"
+          find . -name "aseprite.exe" -type f 2>/dev/null || echo "No aseprite.exe found anywhere"
+          exit 1
+        fi
+        
+        # Set build dir for next steps
+        echo "BUILD_DIR=$build_dir" >> $GITHUB_ENV
+        
+    - name: Package application
+      if: ${{ inputs.upload_artifacts }}
+      shell: bash
+      run: |
+        package_name="aseprite-exe-$(date +%Y%m%d-%H%M%S)"
+        mkdir -p "$package_name"
+        
+        # Copy executable
+        cp "$BUILD_DIR/bin/aseprite.exe" "$package_name/"
+        
+        # Copy data files if they exist
+        if [ -d "data" ]; then
+          cp -r data "$package_name/"
+        fi
+        
+        # Copy documentation
+        [ -f "README.md" ] && cp README.md "$package_name/"
+        [ -f "EULA.txt" ] && cp EULA.txt "$package_name/"
+        [ -f "AUTHORS.md" ] && cp AUTHORS.md "$package_name/"
+        
+        # Create info file
+        echo "Build Date: $(date)" > "$package_name/BUILD_INFO.txt"
+        echo "Build Type: ${{ inputs.build_type }}" >> "$package_name/BUILD_INFO.txt"
+        echo "Git Commit: ${{ github.sha }}" >> "$package_name/BUILD_INFO.txt"
+        echo "Git Branch: ${{ github.ref_name }}" >> "$package_name/BUILD_INFO.txt"
+        echo "Workflow: ${{ github.workflow }}" >> "$package_name/BUILD_INFO.txt"
+        echo "Run ID: ${{ github.run_id }}" >> "$package_name/BUILD_INFO.txt"
+        
+        echo "PACKAGE_NAME=$package_name" >> $GITHUB_ENV
+        
+    - name: Upload build artifacts
+      if: ${{ inputs.upload_artifacts }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.PACKAGE_NAME }}
+        path: ${{ env.PACKAGE_NAME }}/
+        retention-days: 7
+        compression-level: 6
+        
+    - name: Display build summary
+      shell: bash
+      run: |
+        echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Build Type | ${{ inputs.build_type }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Executable | $BUILD_DIR/bin/aseprite.exe |" >> $GITHUB_STEP_SUMMARY
+        
+        if [ -f "$BUILD_DIR/bin/aseprite.exe" ]; then
+          file_size=$(stat -c%s "$BUILD_DIR/bin/aseprite.exe")
+          echo "| File Size | $file_size bytes |" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "| Artifacts Uploaded | ${{ inputs.upload_artifacts }} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ inputs.upload_artifacts }}" == "true" ]; then
+          echo "📦 **Artifacts available for download from the Actions tab**" >> $GITHUB_STEP_SUMMARY
+        fi

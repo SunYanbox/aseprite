@@ -1,0 +1,155 @@
+name: Create Release with EXE
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag name'
+        required: true
+        type: string
+      release_name:
+        description: 'Release name'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as pre-release'
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'
+        
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
+      
+    - name: Setup Ninja
+      uses: aseprite/get-ninja@main
+      
+    - name: Install Skia
+      shell: bash
+      run: |
+        this_dir=$(cygpath "${{ github.workspace }}")
+        skia_url=$(source $this_dir/laf/misc/skia-url.sh | xargs)
+        skia_file=$(basename $skia_url)
+        echo "Downloading Skia from: $skia_url"
+        curl --ssl-revoke-best-effort -L -o "$skia_file" "$skia_url"
+        unzip "$skia_file" -d skia
+        
+    - name: Configure and build
+      shell: bash
+      run: |
+        # Configure with Release build for distribution
+        cmake -S . -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DENABLE_SCRIPTING=ON \
+          -DLAF_BACKEND=skia \
+          -DSKIA_DIR=$(realpath skia) \
+          -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-x64)
+        
+        # Build the executable
+        cd build && ninja aseprite
+        
+    - name: Create release package
+      shell: bash
+      run: |
+        # Determine tag name
+        if [ "${{ github.event_name }}" == "push" ]; then
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          RELEASE_NAME="Aseprite $TAG_NAME"
+        else
+          TAG_NAME="${{ inputs.tag_name }}"
+          RELEASE_NAME="${{ inputs.release_name }}"
+        fi
+        
+        echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
+        echo "RELEASE_NAME=$RELEASE_NAME" >> $GITHUB_ENV
+        
+        # Create release directory
+        RELEASE_DIR="aseprite-$TAG_NAME-windows"
+        mkdir -p "$RELEASE_DIR"
+        
+        # Copy executable and required files
+        cp build/bin/aseprite.exe "$RELEASE_DIR/"
+        cp -r data "$RELEASE_DIR/"
+        cp README.md "$RELEASE_DIR/"
+        cp EULA.txt "$RELEASE_DIR/"
+        cp AUTHORS.md "$RELEASE_DIR/"
+        
+        # Create release info
+        echo "Aseprite Release $TAG_NAME" > "$RELEASE_DIR/RELEASE_INFO.txt"
+        echo "Built on: $(date)" >> "$RELEASE_DIR/RELEASE_INFO.txt"
+        echo "Git commit: ${{ github.sha }}" >> "$RELEASE_DIR/RELEASE_INFO.txt"
+        echo "Platform: Windows x64" >> "$RELEASE_DIR/RELEASE_INFO.txt"
+        echo "" >> "$RELEASE_DIR/RELEASE_INFO.txt"
+        echo "This package contains:" >> "$RELEASE_DIR/RELEASE_INFO.txt"
+        echo "- aseprite.exe - The main Aseprite application" >> "$RELEASE_DIR/RELEASE_INFO.txt"
+        echo "- data/ - Application data files" >> "$RELEASE_DIR/RELEASE_INFO.txt"
+        echo "- README.md - Project information" >> "$RELEASE_DIR/RELEASE_INFO.txt"
+        echo "- EULA.txt - End User License Agreement" >> "$RELEASE_DIR/RELEASE_INFO.txt"
+        echo "- AUTHORS.md - Contributors list" >> "$RELEASE_DIR/RELEASE_INFO.txt"
+        echo "" >> "$RELEASE_DIR/RELEASE_INFO.txt"
+        echo "To run Aseprite, simply execute aseprite.exe" >> "$RELEASE_DIR/RELEASE_INFO.txt"
+
+        # Create ZIP archive
+        7z a -tzip "aseprite-$TAG_NAME-windows.zip" "$RELEASE_DIR/*"
+        
+        echo "RELEASE_DIR=$RELEASE_DIR" >> $GITHUB_ENV
+        echo "ZIP_FILE=aseprite-$TAG_NAME-windows.zip" >> $GITHUB_ENV
+        
+    - name: Create GitHub Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ env.TAG_NAME }}
+        release_name: ${{ env.RELEASE_NAME }}
+        body: |
+          ## Aseprite Windows Release
+          
+          This release contains the Windows executable for Aseprite.
+          
+          ### What's included:
+          - `aseprite.exe` - Main application executable
+          - `data/` - Required application data
+          - Documentation files
+          
+          ### System Requirements:
+          - Windows 10 or later
+          - x64 architecture
+          
+          ### Installation:
+          1. Download the ZIP file below
+          2. Extract to your preferred location
+          3. Run `aseprite.exe`
+          
+          Built from commit: ${{ github.sha }}
+        draft: false
+        prerelease: ${{ inputs.prerelease || false }}
+        
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./${{ env.ZIP_FILE }}
+        asset_name: ${{ env.ZIP_FILE }}
+        asset_content_type: application/zip
+        
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-build-${{ env.TAG_NAME }}
+        path: ${{ env.RELEASE_DIR }}/
+        retention-days: 30
